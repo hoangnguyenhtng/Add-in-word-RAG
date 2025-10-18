@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp
+  xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+  xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+  xsi:type="TaskPaneApp">
+
+  <!-- GUID bất kỳ nhưng cố định; dùng cái này tạm ổn -->
+  <Id>6c8b8e6d-0c69-4b6d-bb90-8c9d2a7f8a21</Id>
+  <Version>1.0.0.7</Version>
+  <ProviderName>Mystic Crew</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+
+  <DisplayName DefaultValue="RAG Chat Assistant for Word"/>
+  <Description DefaultValue="Taskpane AI RAG cho Word: hỏi–đáp theo văn bản hiện tại và so sánh với kho Pinecone (Gemini)."/>
+
+  <!-- Biểu tượng cấp app (không bắt buộc, nhưng nên có) -->
+  <IconUrl DefaultValue="https://localhost:8000/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://localhost:8000/assets/icon-80.png"/>
+
+  <!-- Bắt buộc định nghĩa host -->
+  <Hosts>
+    <Host Name="Document"/>
+  </Hosts>
+
+  <!-- DefaultSettings: đảm bảo add-in vẫn hợp lệ ngay cả khi không có commands -->
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://localhost:8000/taskpane.html"/>
+  </DefaultSettings>
+
+  <!-- AppDomains cho phép gọi về backend -->
+  <AppDomains>
+    <AppDomain>https://localhost:8000</AppDomain>
+  </AppDomains>
+
+  <!-- VersionOverrides: ribbon button để mở taskpane -->
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_1">
+    <Hosts>
+      <Host xsi:type="Document">
+        <DesktopFormFactor>
+          <!-- FunctionFile có thể trỏ luôn về taskpane.html (miễn có Office.initialize) -->
+          <FunctionFile resid="Res.FunctionFile"/>
+
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="Res.Group" label="RAG Assistant">
+                <Control xsi:type="Button" id="Res.Button.OpenPane">
+                  <Label resid="Res.Button.OpenPane.Label"/>
+                  <Supertip>
+                    <Title resid="Res.Button.OpenPane.Label"/>
+                    <Description resid="Res.Button.OpenPane.Desc"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Res.Icon16"/>
+                    <bt:Image size="32" resid="Res.Icon32"/>
+                    <bt:Image size="80" resid="Res.Icon80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>Taskpane.RAG</TaskpaneId>
+                    <SourceLocation resid="Res.Taskpane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Res.Icon16" DefaultValue="https://localhost:8000/assets/icon-16.png"/>
+        <bt:Image id="Res.Icon32" DefaultValue="https://localhost:8000/assets/icon-32.png"/>
+        <bt:Image id="Res.Icon80" DefaultValue="https://localhost:8000/assets/icon-80.png"/>
+      </bt:Images>
+
+      <bt:Urls>
+        <bt:Url id="Res.FunctionFile" DefaultValue="https://localhost:8000/taskpane.html"/>
+        <bt:Url id="Res.Taskpane.Url" DefaultValue="https://localhost:8000/taskpane.html"/>
+      </bt:Urls>
+
+      <bt:ShortStrings>
+        <bt:String id="Res.Button.OpenPane.Label" DefaultValue="Open RAG Chat"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="Res.Button.OpenPane.Desc" DefaultValue="Mở taskpane để hỏi–đáp theo tài liệu hiện tại và tìm trong kho Pinecone."/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>

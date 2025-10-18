@@ -1,0 +1,95 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>RAG Chat Assistant</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+                 img-src 'self' data:;
+                 style-src 'self' 'unsafe-inline';
+                 script-src 'self' https://appsforoffice.microsoft.com;
+                 connect-src 'self' https://localhost:8000 http://localhost:8000;">
+  <link rel="stylesheet" href="/taskpane.css"/>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <script defer src="/taskpane.js"></script>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Word RAG Chat</h1>
+      <div class="tabs">
+        <button class="tab active" data-tab="chat">💬 Chat</button>
+        <button class="tab" data-tab="manage">📚 Quản lý KB</button>
+      </div>
+    </header>
+
+    <div id="tab-chat" class="tab-content active">
+      <section class="options">
+        <label><input type="radio" name="scope" value="selection" checked> Chỉ vùng bôi đen</label>
+        <label><input type="radio" name="scope" value="document"> Toàn bộ tài liệu</label>
+        <label class="switch">
+          <input type="checkbox" id="use-kb" checked>
+          <span>🔍 Tìm trong kho dữ liệu</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" id="with-citations" checked>
+          <span>📎 Trả về kèm tham chiếu</span>
+        </label>
+      </section>
+
+      <div id="chat"></div>
+
+      <form id="composer">
+        <input id="question" placeholder="Đặt câu hỏi về tài liệu…"/>
+        <button type="submit">Hỏi</button>
+      </form>
+    </div>
+
+    <div id="tab-manage" class="tab-content">
+      <section class="kb-section">
+        <h2>Lưu tài liệu vào kho</h2>
+        <div class="kb-form">
+          <label>
+            Tiêu đề tài liệu:
+            <input type="text" id="doc-title" placeholder="Ví dụ: Luật An toàn giao thông 2024"/>
+          </label>
+          <label>
+            Loại tài liệu:
+            <select id="doc-type">
+              <option value="law">Văn bản pháp luật</option>
+              <option value="contract">Hợp đồng</option>
+              <option value="policy">Chính sách</option>
+              <option value="report">Báo cáo</option>
+              <option value="other">Khác</option>
+            </select>
+          </label>
+          <label>
+            Ngày ban hành (tùy chọn):
+            <input type="date" id="doc-date"/>
+          </label>
+          <div class="kb-actions">
+            <button id="index-current-doc" class="btn-primary">📤 Lưu tài liệu hiện tại</button>
+            <button id="index-selection" class="btn-secondary">📤 Lưu vùng chọn</button>
+          </div>
+          <div id="index-status" class="status-message"></div>
+        </div>
+      </section>
+
+      <section class="kb-section">
+        <h2>Thống kê kho dữ liệu</h2>
+        <div id="kb-stats" class="kb-stats"><p>Đang tải...</p></div>
+        <button id="refresh-stats" class="btn-secondary">🔄 Làm mới</button>
+      </section>
+
+      <section class="kb-section">
+        <h2>Tìm kiếm nhanh trong kho</h2>
+        <div class="search-form">
+          <input type="text" id="kb-search-query" placeholder="Nhập từ khóa tìm kiếm..."/>
+          <button id="kb-search-btn" class="btn-primary">🔍 Tìm</button>
+        </div>
+        <div id="kb-search-results"></div>
+      </section>
+    </div>
+  </div>
+</body>
+</html>
