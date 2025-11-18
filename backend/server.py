@@ -12,6 +12,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+import chromadb
+from chromadb.config import Settings
+from chromadb.utils.embedding_functions import EmbeddingFunction
+
 # ========================
 # Pinecone (gRPC classic) + cấu hình
 # ========================
@@ -42,6 +46,8 @@ pc = Pinecone(api_key=PINECONE_API_KEY)
 
 INDEX_NAME = "word-rag-integrated"
 REGION = "us-east-1"
+
+
 
 # Tạo index kiểu integrated model
 if not pc.has_index(INDEX_NAME):
@@ -86,6 +92,23 @@ app.add_middleware(
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 app.mount("/assets", StaticFiles(directory=str(WEB_DIR / "assets")), name="assets")
 
+STAGING_PATH = str((Path(__file__).resolve().parent / "data" / "chroma_staging").mkdir(parents=True, exist_ok=True) or (Path(__file__).resolve().parent / "data" / "chroma_staging"))
+# Chroma 0.5+ PersistentClient
+_chroma_client = chromadb.PersistentClient(path=STAGING_PATH, settings=Settings(anonymized_telemetry=False))
+
+class ZeroEmbedding(EmbeddingFunction):
+    def __call__(self, inputs):
+        if isinstance(inputs, str):  # Chroma có thể gọi đơn lẻ
+            inputs = [inputs]
+        return [[0.0] * DIMENSION for _ in inputs]  # chỉ để “giữ chỗ”
+
+def get_staging_collection():
+    # Lưu chunks tạm; không dùng Chroma để search, nên dùng zero-embedding để khỏi tính vector lúc stage
+    return _chroma_client.get_or_create_collection(
+        name="kb_staging",
+        embedding_function=ZeroEmbedding()
+    ) 
+
 # ========================
 # Models
 # ========================
@@ -102,6 +125,264 @@ class SearchPayload(BaseModel):
     query: str
     top_k: int = 5
     filter: Optional[Dict] = None
+
+    # ========================
+# STAGE DOCUMENT (to Chroma)
+# ========================
+class StageDocumentPayload(BaseModel):
+    # "url": server tự tải; "office": client gửi base64
+    source: str
+    url: Optional[str] = None
+    filename: Optional[str] = None
+    content_base64: Optional[str] = None
+    metadata: Dict = {}
+    options: Dict = {}
+
+MAX_DOWNLOAD_MB = 50
+MAX_PAGES_PDF = 2000
+
+def _ext_from_filename(name: Optional[str]) -> str:
+    if not name: return ""
+    name = name.lower().strip()
+    for ext in (".pdf", ".docx", ".txt"):
+        if name.endswith(ext): return ext
+    return ""
+
+def _download_to_temp(url: str, temp_dir: Path, filename_hint: Optional[str]) -> Path:
+    import requests
+    r = requests.get(url, stream=True, timeout=30)
+    r.raise_for_status()
+    total = 0
+    ext = _ext_from_filename(filename_hint) or ".bin"
+    dst = temp_dir / f"download{ext}"
+    with open(dst, "wb") as f:
+        for chunk in r.iter_content(1024 * 1024):
+            if chunk:
+                f.write(chunk)
+                total += len(chunk)
+                if total > MAX_DOWNLOAD_MB * 1024 * 1024:
+                    raise HTTPException(413, detail=f"File > {MAX_DOWNLOAD_MB}MB")
+    return dst
+
+def _write_base64_to_temp(b64: str, temp_dir: Path, filename_hint: Optional[str]) -> Path:
+    import base64
+    data = base64.b64decode(b64)
+    if len(data) > MAX_DOWNLOAD_MB * 1024 * 1024:
+        raise HTTPException(413, detail=f"File > {MAX_DOWNLOAD_MB}MB")
+    ext = _ext_from_filename(filename_hint) or ".bin"
+    dst = temp_dir / f"upload{ext}"
+    with open(dst, "wb") as f:
+        f.write(data)
+    return dst
+
+# PDF/DOCX/TXT extract
+try:
+    from pypdf import PdfReader
+except Exception:
+    PdfReader = None
+try:
+    from docx import Document as DocxDocument
+except Exception:
+    DocxDocument = None
+
+def _extract_text_any(path: Path) -> str:
+    name = path.name.lower()
+    if name.endswith(".txt"):
+        return path.read_text(encoding="utf-8", errors="ignore")
+    if name.endswith(".docx"):
+        if not DocxDocument: raise HTTPException(500, detail="Thiếu python-docx")
+        d = DocxDocument(str(path))
+        return "\n".join(p.text for p in d.paragraphs)
+    if name.endswith(".pdf"):
+        if not PdfReader: raise HTTPException(500, detail="Thiếu pypdf")
+        reader = PdfReader(str(path))
+        pages = min(len(reader.pages), MAX_PAGES_PDF)
+        return "\n".join((reader.pages[i].extract_text() or "") for i in range(pages))
+    raise HTTPException(415, detail="Chỉ hỗ trợ .pdf/.docx/.txt")
+
+def _chunk_text_to_list(text: str, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    out = []
+    n = len(text); i = 0
+    while i < n:
+        end = min(i + chunk_size, n)
+        t = text[i:end].strip()
+        if t:
+            out.append({"text": t, "start": i, "end": end})
+        i = end - overlap
+        if i <= 0: i = end
+    return out
+
+# ========================
+# FLUSH STAGED -> Pinecone
+# ========================
+class FlushPayload(BaseModel):
+    doc_id: Optional[str] = None
+    limit: int = 500       # tổng số chunks tối đa upload trong 1 lần (an toàn)
+    embed_batch: int = 16  # batch embed
+    upsert_batch: int = 32 # batch upsert
+
+@app.post("/flush_staged")
+def flush_staged(payload: FlushPayload):
+    # Pinecone phải sẵn sàng
+    if index is None:
+        raise HTTPException(503, detail="Pinecone chưa sẵn sàng")
+
+    col = get_staging_collection()
+
+    # Lấy ids theo từng trang nhỏ để tránh load tất cả vào RAM
+    # Chroma 0.5 có get(limit, offset, where)
+    remaining = payload.limit
+    offset = 0
+    done = 0
+    deleted_ids_total = []
+
+    where = {"doc_id": payload.doc_id} if payload.doc_id else None
+
+    while remaining > 0:
+        page_size = min(200, remaining)
+        batch = col.get(where=where, limit=page_size, offset=offset, include=["documents","metadatas","embeddings"])
+        ids = batch.get("ids", [])
+        docs = batch.get("documents", [])
+        metas = batch.get("metadatas", [])
+
+        if not ids:
+            break  # hết dữ liệu
+
+        # Tính embedding theo lô nhỏ
+        embed_batch = max(1, payload.embed_batch)
+        upsert_batch = max(1, payload.upsert_batch)
+
+        to_upsert = []
+        for i in range(0, len(docs), embed_batch):
+            sub_docs = docs[i:i+embed_batch]
+            embs = embed_texts(sub_docs)  # Gemini text-embedding-004 (768-D)
+
+            # gom record
+            for j, emb in enumerate(embs):
+                k = i + j
+                rec_id = ids[k]
+                md = metas[k] or {}
+                # đảm bảo doc_id tồn tại
+                md.setdefault("doc_id", md.get("doc_id", "unknown"))
+                # chunk_text giữ lại 1 phần đầu để search tóm tắt (tuỳ)
+                to_upsert.append({
+                    "id": rec_id,
+                    "values": emb,
+                    "metadata": {
+                        **md,
+                        "chunk_text": docs[k][:CHUNK_SIZE],  # giữ đoạn text
+                    }
+                })
+
+            # đẩy lên Pinecone theo lô upsert_batch
+            while len(to_upsert) >= upsert_batch:
+                payload_up = to_upsert[:upsert_batch]
+                index.upsert(vectors=payload_up, namespace=NAMESPACE)
+                del to_upsert[:upsert_batch]
+                time.sleep(0.05)
+
+        # phần dư
+        if to_upsert:
+            index.upsert(vectors=to_upsert, namespace=NAMESPACE)
+            to_upsert.clear()
+
+        # Xoá các id đã upsert khỏi staging
+        col.delete(ids=ids)
+        deleted_ids_total.extend(ids)
+
+        uploaded = len(ids)
+        done += uploaded
+        remaining -= uploaded
+        # Không tăng offset khi đã xoá các id vừa lấy (tránh nhảy cóc)
+        # Nếu bạn không xoá ở đây, cần offset += len(ids)
+
+        # an toàn: tạm dừng ngắn tránh nóng máy
+        time.sleep(0.05)
+
+    return {
+        "success": True,
+        "uploaded_chunks": done,
+        "deleted_from_staging": len(deleted_ids_total),
+        "message": f"✅ Đã flush {done} chunks từ Chroma lên Pinecone và xóa staging tương ứng."
+    }
+
+@app.get("/staging_stats")
+def staging_stats(doc_id: Optional[str] = None):
+    col = get_staging_collection()
+    # Chroma chưa expose count by where trực tiếp; ta sẽ lấy id theo lô nhỏ để đếm
+    where = {"doc_id": doc_id} if doc_id else None
+    offset = 0; total = 0
+    while True:
+        batch = col.get(where=where, limit=500, offset=offset, include=[])
+        ids = batch.get("ids", [])
+        if not ids: break
+        total += len(ids)
+        offset += len(ids)
+    return {"success": True, "doc_id": doc_id, "staging_count": total}
+
+@app.post("/stage_document")
+def stage_document(payload: StageDocumentPayload):
+    # Không cần Pinecone ở bước này
+    temp_dir = Path(tempfile.mkdtemp(prefix="stage-doc-"))
+    tmp = None
+    try:
+        # 1) lấy file
+        if payload.source == "url":
+            if not payload.url: raise HTTPException(400, detail="Thiếu url")
+            tmp = _download_to_temp(payload.url, temp_dir, payload.filename)
+        elif payload.source == "office":
+            if not payload.content_base64: raise HTTPException(400, detail="Thiếu content_base64")
+            tmp = _write_base64_to_temp(payload.content_base64, temp_dir, payload.filename)
+        else:
+            raise HTTPException(400, detail="source phải là 'url' hoặc 'office'")
+
+        # 2) extract + chunk
+        text = _extract_text_any(tmp)
+        if not text.strip(): raise HTTPException(400, detail="Không trích xuất được nội dung")
+        chunks = _chunk_text_to_list(text)
+        chunk_count = len(chunks)
+
+        # 3) metadata & doc_id
+        meta = payload.metadata or {}
+        base_meta = {
+            **meta,
+            "title": meta.get("title") or meta.get("name") or (payload.filename or tmp.name),
+            "doc_type": meta.get("doc_type") or "other",
+            "date": meta.get("date") or datetime.utcnow().date().isoformat(),
+            "kind": "kb_document",
+            "indexed_at": datetime.utcnow().isoformat(),
+        }
+        doc_id = generate_doc_id(text[:1000], base_meta)
+        base_meta["doc_id"] = doc_id
+
+        # 4) Lưu vào Chroma (zero-embedding) theo batch nhỏ
+        col = get_staging_collection()
+        BATCH = 100
+        ids, docs, metas = [], [], []
+        added = 0
+        for i, ch in enumerate(chunks):
+            ids.append(f"{doc_id}_chunk_{i}")
+            docs.append(ch["text"])
+            metas.append({**base_meta, "chunk_id": i, "start": ch["start"], "end": ch["end"]})
+            if len(ids) >= BATCH:
+                col.add(ids=ids, documents=docs, metadatas=metas)  # zero-embedding tự sinh
+                added += len(ids)
+                ids, docs, metas = [], [], []
+        if ids:
+            col.add(ids=ids, documents=docs, metadatas=metas)
+            added += len(ids)
+
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "title": base_meta["title"],
+            "staged_chunks": added,
+            "message": f"✅ Đã STAGE {added}/{chunk_count} chunks vào Chroma (local)."
+        }
+    finally:
+        try: shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception: pass
+
 
 # ========================
 # Static Endpoints

@@ -5,3 +5,7 @@ pinecone>=5.0.0
 numpy>=1.26.0
 pydantic>=2.9.0
 python-multipart>=0.0.9
+chromadb==0.5.5
+pypdf==4.3.1
+python-docx==1.1.2
+requests==2.32.3
